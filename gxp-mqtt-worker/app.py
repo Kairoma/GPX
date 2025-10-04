@@ -658,17 +658,29 @@ def finalize_complete_assembly(client: mqtt.Client, asm: ImageAssembly,
 
     # Validate size
     if asm.declared_size and actual_size != asm.declared_size:
-        log.warning("[%s] Size mismatch for %s - declared: %d, actual: %d",
+        log.error("[%s] Size mismatch for %s - declared: %d, actual: %d",
                    device_hw_id, image_name, asm.declared_size, actual_size)
-        insert_error(device_id, asm.capture_id, 2202, "warn", "size_mismatch",
+        insert_error(device_id, asm.capture_id, 2202, "error", "size_mismatch",
                     {"declared": asm.declared_size, "actual": actual_size})
+        # Mark capture as failed and abort
+        sb.table("captures").update({
+            "ingest_status": "failed",
+            "ingest_error": f"Size mismatch: declared {asm.declared_size}, actual {actual_size}"
+        }).eq("capture_id", asm.capture_id).execute()
+        return  # Abort assembly
 
     # Validate JPEG signature (SOI: FF D8, EOI: FF D9)
     if not (len(img_bytes) >= 4 and
             img_bytes[0] == 0xFF and img_bytes[1] == 0xD8 and
             img_bytes[-2] == 0xFF and img_bytes[-1] == 0xD9):
-        log.warning("[%s] Invalid JPEG signature for %s", device_hw_id, image_name)
-        insert_error(device_id, asm.capture_id, 2203, "warn", "invalid_jpeg_signature", {})
+        log.error("[%s] Invalid JPEG signature for %s", device_hw_id, image_name)
+        insert_error(device_id, asm.capture_id, 2203, "error", "invalid_jpeg_signature", {})
+        # Mark capture as failed and abort
+        sb.table("captures").update({
+            "ingest_status": "failed",
+            "ingest_error": "Invalid JPEG: missing SOI or EOI markers"
+        }).eq("capture_id", asm.capture_id).execute()
+        return  # Abort assembly
 
     # Calculate SHA256
     img_sha = sha256_hex(img_bytes)
