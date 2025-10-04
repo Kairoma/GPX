@@ -264,13 +264,17 @@ def insert_sensor_reading(device_id: str, capture_id: str, meta: dict):
     Firmware provides: temperature, humidity, pressure, gas_resistance
     """
     try:
+        # Convert gas_resistance from ohms to kilohms
+        gas_resistance_ohms = meta.get("gas_resistance")
+        gas_kohm = gas_resistance_ohms / 1000.0 if gas_resistance_ohms else None
+
         row = {
             "capture_id": capture_id,
             "device_id": device_id,
             "temperature_c": meta.get("temperature"),
             "humidity_pct": meta.get("humidity"),
             "pressure_hpa": meta.get("pressure"),
-            "gas_kohm": meta.get("gas_resistance"),  # Schema has gas_kohm field
+            "gas_kohm": gas_kohm,  # Convert ohms to kilohms
             "raw": meta
         }
         sb.table("sensor_readings").insert(row).execute()
