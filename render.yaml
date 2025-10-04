@@ -4,8 +4,8 @@ services:
     env: python
     plan: starter
     region: oregon  # Change to your preferred region
-    buildCommand: "pip install -r gxp-mqtt-worker/requirements.txt"
-    startCommand: "cd gxp-mqtt-worker && python app.py"
+    buildCommand: "./build.sh"
+    startCommand: "./start.sh"
     envVars:
       # MQTT Broker Configuration
       - key: MQTT_HOST
