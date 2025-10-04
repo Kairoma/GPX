@@ -1,0 +1,48 @@
+services:
+  - type: worker
+    name: gxp-mqtt-worker
+    env: python
+    plan: starter
+    region: oregon  # Change to your preferred region
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      # MQTT Broker Configuration
+      - key: MQTT_HOST
+        value: 1305ceddedc94b9fa7fba9428fe4624e.s1.eu.hivemq.cloud
+      - key: MQTT_PORT
+        value: "8883"
+      - key: MQTT_TLS
+        value: "true"
+      - key: MQTT_USERNAME
+        sync: false  # Set in Render dashboard (secret)
+      - key: MQTT_PASSWORD
+        sync: false  # Set in Render dashboard (secret)
+
+      # MQTT Topic Patterns (matching ESP32 firmware)
+      - key: TOPIC_PATTERN_DATA
+        value: ESP32CAM/+/data
+      - key: TOPIC_PATTERN_STATUS
+        value: ESP32CAM/+/status
+      - key: TOPIC_PATTERN_ACK
+        value: ESP32CAM/+/ack
+
+      # Supabase Configuration
+      - key: SUPABASE_URL
+        sync: false  # Set in Render dashboard (secret)
+      - key: SUPABASE_SERVICE_ROLE
+        sync: false  # Set in Render dashboard (secret)
+      - key: SUPABASE_STORAGE_BUCKET
+        value: gxp-captures
+
+      # Image Assembly Configuration
+      - key: CAPTURE_TIMEOUT_MS
+        value: "60000"  # 60 seconds to assemble one image
+      - key: RETRANSMIT_DELAY_MS
+        value: "3000"   # Wait 3s before requesting missing chunks
+      - key: RETRANSMIT_MAX
+        value: "3"      # Max 3 retransmit attempts
+
+      # Logging
+      - key: LOG_LEVEL
+        value: INFO  # Options: DEBUG, INFO, WARNING, ERROR
