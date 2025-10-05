@@ -232,6 +232,9 @@ def upsert_capture_from_metadata(device_id: str, meta: dict) -> Tuple[str, dict]
     if not image_name:
         raise ValueError("image_name is required in metadata")
 
+    # Build sensor data JSONB from metadata
+    sensor_data = build_sensor_data_jsonb(meta)
+
     cap_row = {
         "device_id": device_id,
         "device_capture_id": image_name,
@@ -241,7 +244,8 @@ def upsert_capture_from_metadata(device_id: str, meta: dict) -> Tuple[str, dict]
         "total_chunks": total_chunks,
         "img_format": "jpeg",
         "ingest_status": "assembling",
-        "ingest_meta": meta
+        "ingest_meta": meta,
+        "sensor_data": sensor_data  # Add sensor data to captures table
     }
 
     try:
@@ -268,30 +272,34 @@ def upsert_capture_from_metadata(device_id: str, meta: dict) -> Tuple[str, dict]
         raise
 
 
-def insert_sensor_reading(device_id: str, capture_id: str, meta: dict):
+def build_sensor_data_jsonb(meta: dict) -> dict:
     """
-    Insert sensor reading from BME680.
+    Build sensor_data JSONB object from metadata.
 
     Firmware provides: temperature, humidity, pressure, gas_resistance
+    Returns JSONB-compatible dict for captures.sensor_data column
     """
-    try:
-        # Convert gas_resistance from ohms to kilohms
-        gas_resistance_ohms = meta.get("gas_resistance")
-        gas_kohm = gas_resistance_ohms / 1000.0 if gas_resistance_ohms else None
+    # Convert gas_resistance from ohms to kilohms
+    gas_resistance_ohms = meta.get("gas_resistance")
+    gas_kohm = gas_resistance_ohms / 1000.0 if gas_resistance_ohms else None
 
-        row = {
-            "capture_id": capture_id,
-            "device_id": device_id,
-            "temperature_c": meta.get("temperature"),
-            "humidity_pct": meta.get("humidity"),
-            "pressure_hpa": meta.get("pressure"),
-            "gas_kohm": gas_kohm,  # Convert ohms to kilohms
-            "raw": meta
-        }
-        sb.table("sensor_readings").insert(row).execute()
-        log.debug("Sensor reading inserted for capture %s", capture_id)
-    except Exception as e:
-        log.warning("sensor_readings insert failed: %s", e)
+    sensor_data = {}
+
+    # Only include non-null values
+    if meta.get("temperature") is not None:
+        sensor_data["temperature_c"] = meta.get("temperature")
+    if meta.get("humidity") is not None:
+        sensor_data["humidity_pct"] = meta.get("humidity")
+    if meta.get("pressure") is not None:
+        sensor_data["pressure_hpa"] = meta.get("pressure")
+    if gas_kohm is not None:
+        sensor_data["gas_kohm"] = gas_kohm
+
+    # Add captured timestamp
+    if meta.get("capture_timeStamp") or meta.get("capture_timestamp"):
+        sensor_data["captured_at"] = meta.get("capture_timeStamp") or meta.get("capture_timestamp")
+
+    return sensor_data
 
 
 # ------------ Image Assembly State ------------
@@ -609,12 +617,8 @@ def handle_metadata(client: mqtt.Client, device_id: str, device_hw_id: str,
     log_publish(device_id, topic, "in", log_msg)
 
     try:
-        # Create/update capture record
+        # Create/update capture record (includes sensor data in JSONB)
         capture_id, cap_row = upsert_capture_from_metadata(device_id, msg)
-
-        # Insert sensor reading if sensor data present
-        if any(k in msg for k in ["temperature", "humidity", "pressure", "gas_resistance"]):
-            insert_sensor_reading(device_id, capture_id, msg)
 
         # Check for ESP32 error code (device-reported capture failure)
         esp32_error = msg.get("error", 0)
