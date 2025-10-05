@@ -403,10 +403,42 @@ def publish_ack_ok(client: mqtt.Client, device_hw_id: str, image_name: str,
     log.info("[%s] ACK_OK sent for image: %s", device_hw_id, image_name)
 
 
+def send_device_config(client: mqtt.Client, device_id: str, device_hw_id: str, pending_count: int):
+    """
+    Send device configuration command in response to status/alive message.
+
+    Per firmware protocol (Flow Diagram, page 10):
+    1. Check if scheduled time arrived
+    2. If YES: Send capture_image command
+    3. If NO: Send next_wake command with wake-up time
+
+    For MVP: Always send capture_image (on-demand capture mode)
+    TODO: Implement scheduling logic with database-driven wake windows
+    """
+    cmd_topic = f"ESP32CAM/{device_hw_id}/cmd"
+
+    # MVP Strategy: Trigger immediate capture
+    # This allows on-demand operation without complex scheduling
+    config_msg = {
+        "device_id": device_hw_id,
+        "capture_image": True
+    }
+
+    try:
+        client.publish(cmd_topic, json.dumps(config_msg), qos=1)
+        log.info("[%s] Device config sent: capture_image", device_hw_id)
+
+        # Log the command sent
+        log_publish(device_id, cmd_topic, "out", config_msg)
+
+    except Exception as e:
+        log.error("[%s] Failed to send device config: %s", device_hw_id, e)
+
+
 # ------------ MQTT Message Handlers ------------
 def handle_status_message(client: mqtt.Client, topic: str, payload: bytes):
     """
-    Handle device status message.
+    Handle device status message (HELLO/Alive).
 
     Firmware format:
     {
@@ -414,6 +446,10 @@ def handle_status_message(client: mqtt.Client, topic: str, payload: bytes):
       "status": "Alive",
       "pendingImg": 3
     }
+
+    Per firmware protocol (Section 5), server MUST respond with:
+    - capture_image command if scheduled time arrived, OR
+    - next_wake command with wake-up time if not scheduled
     """
     device_hw_id = extract_mac_from_topic(topic)
 
@@ -427,13 +463,16 @@ def handle_status_message(client: mqtt.Client, topic: str, payload: bytes):
 
     # Extract status fields
     status = msg.get("status", "unknown")
-    pending_count = msg.get("pendingImg")
+    pending_count = msg.get("pendingImg", 0)
 
     # Insert status record
     insert_device_status(device_id, status, msg, pending=pending_count)
     log_publish(device_id, topic, "in", msg)
 
     log.info("[%s] Status: %s (pending: %s)", device_hw_id, status, pending_count)
+
+    # CRITICAL: Respond with device configuration per firmware protocol
+    send_device_config(client, device_id, device_hw_id, pending_count)
 
 
 def handle_data_message(client: mqtt.Client, topic: str, payload: bytes):
