@@ -190,6 +190,17 @@ def insert_error(device_id: str, capture_id: Optional[str], code: int, severity:
         log.error("device_errors insert failed: %s", e)
 
 
+def get_esp32_error_message(error_code: int) -> str:
+    """Map ESP32 error codes to human-readable messages."""
+    error_messages = {
+        1: "Camera initialization failed",
+        2: "Image capture failed",
+        3: "Sensor read failed",
+        4: "Memory allocation failed"
+    }
+    return error_messages.get(error_code, f"Unknown error (code {error_code})")
+
+
 def upsert_capture_from_metadata(device_id: str, meta: dict) -> Tuple[str, dict]:
     """
     Create or update a 'captures' row from metadata message.
@@ -494,6 +505,35 @@ def handle_metadata(client: mqtt.Client, device_id: str, device_hw_id: str,
         # Insert sensor reading if sensor data present
         if any(k in msg for k in ["temperature", "humidity", "pressure", "gas_resistance"]):
             insert_sensor_reading(device_id, capture_id, msg)
+
+        # Check for ESP32 error code (device-reported capture failure)
+        esp32_error = msg.get("error", 0)
+        if esp32_error != 0:
+            # ESP32 reported a capture failure - no image to assemble
+            error_msg = get_esp32_error_message(esp32_error)
+            log.warning("[%s] ESP32 error %d: %s", device_hw_id, esp32_error, error_msg)
+
+            # Log the ESP32 error to device_errors table (use 1000+ range for ESP32 errors)
+            insert_error(
+                device_id=device_id,
+                capture_id=capture_id,
+                code=1000 + esp32_error,
+                severity="error",
+                message=f"esp32_capture_error: {error_msg}",
+                details={"esp32_error_code": esp32_error, "metadata": msg}
+            )
+
+            # Mark capture as failed immediately (don't wait for timeout)
+            sb.table("captures").update({
+                "ingest_status": "failed",
+                "ingest_error": f"ESP32 error {esp32_error}: {error_msg}"
+            }).eq("capture_id", capture_id).execute()
+
+            log.info("[%s] Capture %s marked as failed (ESP32 error %d)",
+                    device_hw_id, image_name, esp32_error)
+
+            # Don't start assembly - return early
+            return
 
         # Initialize assembly state
         key = (device_hw_id, image_name)
