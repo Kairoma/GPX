@@ -818,6 +818,92 @@ def on_message(client, userdata, msg: mqtt.MQTTMessage):
         log.error("Error handling message on %s: %s", topic, e)
 
 
+def poll_and_send_commands(client: mqtt.Client):
+    """
+    Poll device_commands table for queued commands and send via MQTT.
+
+    Command types from firmware:
+    - capture_image: Trigger immediate capture
+    - send_image: Request device to send specific image
+    """
+    try:
+        # Query for queued commands
+        result = sb.table("device_commands")\
+            .select("command_id, device_id, command_type, command_payload, devices(device_hw_id)")\
+            .eq("status", "queued")\
+            .order("requested_at")\
+            .limit(10)\
+            .execute()
+
+        if not result.data:
+            return  # No queued commands
+
+        for cmd_row in result.data:
+            command_id = cmd_row["command_id"]
+            device_id = cmd_row["device_id"]
+            command_type = cmd_row["command_type"]
+            command_payload = cmd_row.get("command_payload", {})
+
+            # Get device MAC address
+            device_hw_id = cmd_row["devices"]["device_hw_id"]
+
+            # Build command topic
+            cmd_topic = f"ESP32CAM/{device_hw_id}/cmd"
+
+            # Build command message based on type
+            if command_type == "capture_image":
+                message = {
+                    "device_id": device_hw_id,
+                    "capture_image": True
+                }
+            elif command_type == "send_image":
+                image_name = command_payload.get("image_name")
+                if not image_name:
+                    log.warning("send_image command missing image_name, skipping")
+                    continue
+                message = {
+                    "device_id": device_hw_id,
+                    "send_image": image_name
+                }
+            elif command_type == "next_wake":
+                wake_time = command_payload.get("wake_time")
+                if not wake_time:
+                    log.warning("next_wake command missing wake_time, skipping")
+                    continue
+                message = {
+                    "device_id": device_hw_id,
+                    "next_wake": wake_time
+                }
+            else:
+                log.warning("Unknown command type: %s, skipping", command_type)
+                continue
+
+            # Publish command to device
+            try:
+                client.publish(cmd_topic, json.dumps(message), qos=1)
+                log.info("[%s] Command sent: %s", device_hw_id, command_type)
+
+                # Update command status to 'sent'
+                sb.table("device_commands").update({
+                    "status": "sent",
+                    "sent_at": now_iso()
+                }).eq("command_id", command_id).execute()
+
+                # Log to device_command_logs
+                sb.table("device_command_logs").insert({
+                    "command_id": command_id,
+                    "device_id": device_id,
+                    "event_type": "sent",
+                    "event_payload": {"message": message, "topic": cmd_topic}
+                }).execute()
+
+            except Exception as e:
+                log.error("Failed to send command %s: %s", command_id, e)
+
+    except Exception as e:
+        log.error("Error polling commands: %s", e)
+
+
 def main():
     """Main worker loop."""
     # Register signal handlers
@@ -868,6 +954,10 @@ def main():
         while running:
             # Periodically check assemblies for completion/retry/timeout
             try_finalize_assemblies(client)
+
+            # Poll and send queued commands
+            poll_and_send_commands(client)
+
             time.sleep(0.5)
     except Exception as e:
         log.error("Unexpected error in main loop: %s", e)
