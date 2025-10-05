@@ -1,43 +1,43 @@
--- Add device scheduling fields
--- Run this migration in Supabase SQL Editor
+-- Device Scheduling Setup using existing device_configs table
+-- Run this in Supabase SQL Editor
 
--- Add scheduling columns to devices table
+-- NOTE: device_configs table already exists with:
+-- - wakeup_time_1, wakeup_time_2: Scheduled wake times
+-- - capture_per_day: Number of captures (default: 2)
+-- - wakeup_window_sec: Wake window duration (default: 180s = 3min)
+
+-- Add next_wake_at to devices table for dynamic scheduling
 ALTER TABLE public.devices
-ADD COLUMN IF NOT EXISTS capture_interval_hours integer DEFAULT 12,
-ADD COLUMN IF NOT EXISTS next_wake_at timestamp with time zone,
-ADD COLUMN IF NOT EXISTS test_mode boolean DEFAULT false;
+ADD COLUMN IF NOT EXISTS next_wake_at timestamp with time zone;
 
--- Add comments for documentation
-COMMENT ON COLUMN public.devices.capture_interval_hours IS 'Hours between scheduled captures (default: 12, test mode: use 5-10 minutes via decimal)';
-COMMENT ON COLUMN public.devices.next_wake_at IS 'Next scheduled wake time (UTC), dynamically updated by worker';
-COMMENT ON COLUMN public.devices.test_mode IS 'When true, use short wake intervals for testing (5-10 min instead of hours)';
-
--- Set test mode for existing device
-UPDATE public.devices
-SET
-  test_mode = true,
-  capture_interval_hours = 1  -- Will be interpreted as minutes in test mode
-WHERE device_hw_id = 'B8F862F9CFB8';
+-- Add test_mode flag to device_configs for development
+ALTER TABLE public.device_configs
+ADD COLUMN IF NOT EXISTS test_mode boolean DEFAULT false,
+ADD COLUMN IF NOT EXISTS test_interval_minutes integer DEFAULT 5
+  CHECK (test_interval_minutes >= 1 AND test_interval_minutes <= 60);
 
 -- Create index for next_wake_at queries
 CREATE INDEX IF NOT EXISTS idx_devices_next_wake ON public.devices(next_wake_at)
 WHERE next_wake_at IS NOT NULL;
 
--- Helper function to calculate next wake time
-CREATE OR REPLACE FUNCTION calculate_next_wake(
-  current_time timestamp with time zone,
-  interval_hours integer,
-  is_test_mode boolean DEFAULT false
-) RETURNS timestamp with time zone AS $$
-BEGIN
-  IF is_test_mode THEN
-    -- Test mode: interval_hours is treated as MINUTES
-    RETURN current_time + (interval_hours || ' minutes')::interval;
-  ELSE
-    -- Production mode: interval_hours is hours
-    RETURN current_time + (interval_hours || ' hours')::interval;
-  END IF;
-END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+-- Insert config for test device B8F862F9CFB8
+INSERT INTO public.device_configs (device_id, test_mode, test_interval_minutes, capture_per_day, wakeup_window_sec)
+SELECT
+  device_id,
+  true AS test_mode,
+  1 AS test_interval_minutes,  -- 1 minute intervals for testing
+  24 AS capture_per_day,        -- Allow frequent captures
+  60 AS wakeup_window_sec       -- 1 minute wake window
+FROM public.devices
+WHERE device_hw_id = 'B8F862F9CFB8'
+ON CONFLICT (device_id)
+DO UPDATE SET
+  test_mode = true,
+  test_interval_minutes = 1,
+  capture_per_day = 24,
+  wakeup_window_sec = 60;
 
-COMMENT ON FUNCTION calculate_next_wake IS 'Calculate next wake time based on interval and mode (test=minutes, prod=hours)';
+-- Comments
+COMMENT ON COLUMN public.devices.next_wake_at IS 'Next scheduled wake time (UTC), dynamically updated by worker';
+COMMENT ON COLUMN public.device_configs.test_mode IS 'When true, use test_interval_minutes instead of wakeup_time_1/2';
+COMMENT ON COLUMN public.device_configs.test_interval_minutes IS 'Minutes between wakes in test mode (1-60)';

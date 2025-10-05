@@ -420,9 +420,9 @@ def send_device_config(client: mqtt.Client, device_id: str, device_hw_id: str, p
     cmd_topic = f"ESP32CAM/{device_hw_id}/cmd"
 
     try:
-        # Get device scheduling config
+        # Get device scheduling config from device_configs table
         device_result = sb.table("devices")\
-            .select("capture_interval_hours, next_wake_at, test_mode, provisioned_at")\
+            .select("next_wake_at, provisioned_at, device_configs(test_mode, test_interval_minutes, capture_per_day, wakeup_time_1, wakeup_time_2)")\
             .eq("device_id", device_id)\
             .single()\
             .execute()
@@ -432,10 +432,18 @@ def send_device_config(client: mqtt.Client, device_id: str, device_hw_id: str, p
             return
 
         device = device_result.data
-        interval_hours = device.get("capture_interval_hours", 12)
+        config = device.get("device_configs") or {}
         next_wake_at = device.get("next_wake_at")
-        test_mode = device.get("test_mode", False)
-        provisioned_at = device.get("provisioned_at")
+        test_mode = config.get("test_mode", False)
+        test_interval_minutes = config.get("test_interval_minutes", 5)
+        capture_per_day = config.get("capture_per_day", 2)
+
+        # Calculate interval
+        if test_mode:
+            interval_hours = test_interval_minutes  # Will be used as minutes
+        else:
+            # Production: captures per day → hours between captures
+            interval_hours = 24 / capture_per_day if capture_per_day > 0 else 12
 
         current_time = datetime.now(timezone.utc)
 
