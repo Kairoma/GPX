@@ -852,18 +852,31 @@ def finalize_complete_assembly(client: mqtt.Client, asm: ImageAssembly,
                     {"error": str(e), "path": storage_path})
         raise
 
-    # Get public URL (note: bucket is private, so this requires signed URL for access)
-    # For now, store the path; UI can generate signed URLs as needed
-
-    # Update capture record
+    # Generate public URL for the uploaded image
     try:
-        sb.table("captures").update({
-            "ingest_status": "stored",
+        # Get public URL from Supabase Storage
+        public_url_response = sb.storage.from_(STORAGE_BUCKET).get_public_url(storage_path)
+        image_url = public_url_response if isinstance(public_url_response, str) else None
+    except Exception as e:
+        log.warning("[%s] Failed to generate public URL: %s", device_hw_id, e)
+        image_url = None
+
+    # Update capture record with SUCCESS status
+    try:
+        update_data = {
+            "ingest_status": "success",  # Changed from "stored" to "success"
             "storage_path": storage_path,
             "image_sha256": img_sha,
             "image_bytes": actual_size
-        }).eq("capture_id", asm.capture_id).execute()
-        log.info("[%s] Capture record updated: %s", device_hw_id, asm.capture_id)
+        }
+
+        # Only add image_url if we got one
+        if image_url:
+            update_data["image_url"] = image_url
+
+        sb.table("captures").update(update_data).eq("capture_id", asm.capture_id).execute()
+        log.info("[%s] Capture finalized: %s (status=success, %d bytes, sha256=%s)",
+                device_hw_id, asm.capture_id, actual_size, img_sha[:16])
     except Exception as e:
         insert_error(device_id, asm.capture_id, 2205, "error", "capture_update_failed",
                     {"error": str(e)})
