@@ -13,7 +13,7 @@ import base64
 import hashlib
 import logging
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Tuple
 
 import paho.mqtt.client as mqtt
@@ -408,31 +408,94 @@ def send_device_config(client: mqtt.Client, device_id: str, device_hw_id: str, p
     Send device configuration command in response to status/alive message.
 
     Per firmware protocol (Flow Diagram, page 10):
-    1. Check if scheduled time arrived
-    2. If YES: Send capture_image command
-    3. If NO: Send next_wake command with wake-up time
+    1. Check if scheduled time arrived OR first initialization
+    2. If YES: Send capture_image command + calculate next_wake
+    3. If NO: Send next_wake command (sleep until scheduled time)
 
-    For MVP: Always send capture_image (on-demand capture mode)
-    TODO: Implement scheduling logic with database-driven wake windows
+    Scheduling Logic:
+    - Default: 12-hour intervals from provisioning_at
+    - Test mode: 5-10 minute intervals (capture_interval_hours stored as minutes)
+    - Dynamic: Can be updated via device_commands or dashboard
     """
     cmd_topic = f"ESP32CAM/{device_hw_id}/cmd"
 
-    # MVP Strategy: Trigger immediate capture
-    # This allows on-demand operation without complex scheduling
-    config_msg = {
-        "device_id": device_hw_id,
-        "capture_image": True
-    }
-
     try:
-        client.publish(cmd_topic, json.dumps(config_msg), qos=1)
-        log.info("[%s] Device config sent: capture_image", device_hw_id)
+        # Get device scheduling config
+        device_result = sb.table("devices")\
+            .select("capture_interval_hours, next_wake_at, test_mode, provisioned_at")\
+            .eq("device_id", device_id)\
+            .single()\
+            .execute()
 
-        # Log the command sent
+        if not device_result.data:
+            log.error("[%s] Device not found in database", device_hw_id)
+            return
+
+        device = device_result.data
+        interval_hours = device.get("capture_interval_hours", 12)
+        next_wake_at = device.get("next_wake_at")
+        test_mode = device.get("test_mode", False)
+        provisioned_at = device.get("provisioned_at")
+
+        current_time = datetime.now(timezone.utc)
+
+        # Determine if it's time to capture
+        should_capture = False
+
+        if next_wake_at is None:
+            # First wake after provisioning - always capture
+            should_capture = True
+            log.info("[%s] First wake - triggering capture", device_hw_id)
+        else:
+            # Check if scheduled time has arrived
+            next_wake_dt = datetime.fromisoformat(next_wake_at.replace('Z', '+00:00'))
+            should_capture = current_time >= next_wake_dt
+            log.info("[%s] Schedule check: now=%s, next_wake=%s, should_capture=%s",
+                    device_hw_id, current_time.isoformat(), next_wake_at, should_capture)
+
+        if should_capture:
+            # Send capture_image command
+            config_msg = {
+                "device_id": device_hw_id,
+                "capture_image": True
+            }
+
+            # Calculate next wake time
+            if test_mode:
+                # Test mode: interval is in MINUTES
+                next_wake = current_time + timedelta(minutes=interval_hours)
+                log.info("[%s] Test mode: next wake in %d minutes", device_hw_id, interval_hours)
+            else:
+                # Production mode: interval is in HOURS
+                next_wake = current_time + timedelta(hours=interval_hours)
+                log.info("[%s] Production mode: next wake in %d hours", device_hw_id, interval_hours)
+
+            # Update device next_wake_at
+            sb.table("devices")\
+                .update({"next_wake_at": next_wake.isoformat()})\
+                .eq("device_id", device_id)\
+                .execute()
+
+            log.info("[%s] Device config sent: capture_image (next_wake: %s)",
+                    device_hw_id, next_wake.isoformat())
+
+        else:
+            # Not time yet - send next_wake command (device should sleep)
+            config_msg = {
+                "device_id": device_hw_id,
+                "next_wake": next_wake_at
+            }
+            log.info("[%s] Device config sent: next_wake (%s)", device_hw_id, next_wake_at)
+
+        # Publish command
+        client.publish(cmd_topic, json.dumps(config_msg), qos=1)
         log_publish(device_id, cmd_topic, "out", config_msg)
 
     except Exception as e:
         log.error("[%s] Failed to send device config: %s", device_hw_id, e)
+        # Fallback: send capture command to prevent device hang
+        fallback_msg = {"device_id": device_hw_id, "capture_image": True}
+        client.publish(cmd_topic, json.dumps(fallback_msg), qos=1)
 
 
 # ------------ MQTT Message Handlers ------------
