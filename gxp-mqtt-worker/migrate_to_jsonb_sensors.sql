@@ -11,8 +11,7 @@ SET sensor_data = jsonb_build_object(
   'temperature_c', sr.temperature_c,
   'humidity_pct', sr.humidity_pct,
   'pressure_hpa', sr.pressure_hpa,
-  'gas_kohm', sr.gas_kohm,
-  'captured_at', sr.captured_at
+  'gas_kohm', sr.gas_kohm
 )
 FROM public.sensor_readings sr
 WHERE c.capture_id = sr.capture_id
