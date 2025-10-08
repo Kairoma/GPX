@@ -131,6 +131,46 @@ Many duplicate empty metadata messages during retransmission. Doesn't affect fun
 
 ---
 
+## Data Consistency Analysis
+
+**Firmware IS Sending Critical Data Consistently:**
+
+Analysis of device publish logs confirms firmware sends complete, consistent metadata with every capture:
+
+```json
+{
+  "device_id": "B8F862F9CFB8",           // Consistent device identifier
+  "image_name": "image_2.jpg",            // Unique image identifier
+  "image_size": 49272,                    // Total bytes (immutable)
+  "total_chunk_count": 49,                // Expected chunks (immutable)
+  "capture_timeStamp": "2025-10-6T1:04:27Z", // ISO 8601 timestamp
+  "temperature": 26.98,                   // Sensor data (present every time)
+  "humidity": 56.24,
+  "pressure": 1013.51,
+  "gas_resistance": 13.89,
+  "error": 0,                             // Error code (0 = success)
+  "location": "office_404",               // Device location
+  "max_chunks_size": 1024                 // Chunk size constant
+}
+```
+
+**Key Findings:**
+- Device ID: Present in 100% of messages
+- Timestamps: ISO 8601 format, consistent
+- Sensor data: All 4 BME680 metrics present every time
+- Image metadata: Size and chunk count always provided
+- Error codes: Reported (though always 0 in testing)
+
+**What's Missing (See Firmware Issues section):**
+- No status/alive messages to ESP32CAM/{MAC}/status topic
+- No SHA256 image hash
+- No firmware version
+- No battery/power metrics
+- No WiFi quality metrics
+- No heap/memory diagnostics
+
+---
+
 ## Confirmed Working Behaviors
 
 **Image Assembly:**
@@ -327,11 +367,74 @@ Error codes: 0-7
 5. **SHA256 Hash Calculation (INTEGRITY-001)** - Image verification
 6. **Firmware Version Reporting (DEBUG-001)** - Deployment tracking
 
-### OPTIONAL (Nice to Have)
+### RECOMMENDED TELEMETRY (High Value for Production)
 
-- Battery voltage/percentage reporting
-- WiFi RSSI reporting
-- Additional diagnostic metrics
+The following telemetry fields should be added to status messages for production monitoring and troubleshooting:
+
+**Device Health Metrics:**
+```json
+{
+  "device_id": "B8F862F9CFB8",
+  "status": "alive",
+  "firmware_version": "v1.2.3",
+  "uptime_seconds": 3600,
+  "free_heap_bytes": 45000,
+  "min_free_heap_bytes": 38000,
+  "reset_reason": "power_on"
+}
+```
+
+**Power Metrics (Critical for Battery-Powered Devices):**
+```json
+{
+  "battery_voltage_mv": 3700,
+  "battery_percent": 85,
+  "is_charging": false,
+  "power_source": "battery"
+}
+```
+
+**Network Quality Metrics:**
+```json
+{
+  "wifi_ssid": "Office_Network",
+  "wifi_rssi_dbm": -65,
+  "wifi_quality_percent": 75,
+  "mqtt_reconnect_count": 2,
+  "last_disconnect_reason": "wifi_lost"
+}
+```
+
+**Capture Performance Metrics:**
+```json
+{
+  "last_capture_duration_ms": 2500,
+  "last_transmission_duration_ms": 15000,
+  "failed_capture_count": 1,
+  "successful_capture_count": 142
+}
+```
+
+**Benefits:**
+- **Firmware version**: Essential for tracking deployments, debugging field issues
+- **Heap metrics**: Predict memory issues before crashes occur
+- **Battery metrics**: Plan maintenance, optimize sleep schedules
+- **WiFi quality**: Identify connectivity issues, optimize placement
+- **Performance counters**: Track reliability, identify degradation
+
+**Schema Impact:**
+To support this telemetry, add to devices table:
+```sql
+ALTER TABLE devices
+  ADD COLUMN firmware_version VARCHAR(20),
+  ADD COLUMN last_battery_percent INTEGER,
+  ADD COLUMN last_wifi_rssi INTEGER,
+  ADD COLUMN last_heap_free INTEGER,
+  ADD COLUMN total_captures_success INTEGER DEFAULT 0,
+  ADD COLUMN total_captures_failed INTEGER DEFAULT 0;
+```
+
+**Priority:** MEDIUM - Not blocking beta, but high value for production fleet management
 
 ---
 
