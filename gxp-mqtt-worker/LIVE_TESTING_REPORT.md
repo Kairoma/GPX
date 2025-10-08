@@ -2,21 +2,23 @@
 
 **Test Period:** October 5-7, 2025
 **Device:** B8F862F9CFB8 (ESP32S3-CAM)
-**Status:** Ready for Beta Launch
+**Status:** NOT READY FOR BETA - Critical Firmware Issues Identified
 
 ---
 
 ## Executive Summary
 
-Live testing with device B8F862F9CFB8 identified and resolved three critical server-side issues. System is production-ready with optional firmware improvements recommended.
+Live testing with device B8F862F9CFB8 identified and resolved three critical server-side issues, but revealed multiple critical firmware deficiencies that block beta launch.
 
-**Key Fixes:**
+**Server Fixes Completed:**
 - Device initialization handshake implemented
 - Intelligent scheduling system (test + production modes)
 - JSONB sensor data consolidation (eliminated table JOINs)
 - Proper capture finalization with public URLs
 
-**Beta Readiness:** Server 100% ready. Firmware functional, optional improvements available.
+**Beta Readiness:**
+- **Server:** 100% ready
+- **Firmware:** NOT READY - Critical issues must be fixed before beta launch (see Firmware Issues section)
 
 ---
 
@@ -152,32 +154,184 @@ Many duplicate empty metadata messages during retransmission. Doesn't affect fun
 
 ---
 
-## Firmware Recommendations for Beta
+## Critical Firmware Issues (BLOCKING BETA)
 
-### Critical (Blocking)
-None - firmware currently functional.
+### 1. Missing SOI/EOI JPEG Markers (IMAGE-001) - CRITICAL
 
-### Recommended (Non-Blocking)
+**Problem:** Device does not send proper JPEG Start of Image (SOI: 0xFFD8) or End of Image (EOI: 0xFFD9) markers in transmitted chunks.
 
-1. **`next_wake` Command Handling (Medium Priority)**
-   - Parse ISO 8601 timestamp
-   - Calculate sleep duration
-   - Wake at exact time
-   - Fallback to 12-hour default if parsing fails
+**Evidence:** Images assembled from chunks fail to render or display corruption. SHA256 mismatches indicate incomplete/malformed JPEG data.
 
-2. **Metadata Optimization (Low Priority)**
-   - Include sensor data in all metadata publishes, OR
-   - Rate-limit to one metadata per second during transmission
+**Impact:** Cannot verify image integrity. Images may be corrupt or incomplete.
 
-3. **Firmware Version Reporting (Low Priority)**
-   - Add `firmware_version` field to status messages
-   - Useful for troubleshooting and ensuring devices updated
+**Required Fix:**
+- Firmware MUST prepend 0xFFD8 to first chunk
+- Firmware MUST append 0xFFD9 to final chunk
+- OR ensure camera module output includes proper JPEG headers/trailers
 
-### Optional
+**Priority:** BLOCKING - Cannot launch without valid JPEG files
+
+---
+
+### 2. Error Code Implementation Incomplete (ERROR-001) - CRITICAL
+
+**Problem:** Device reports error codes 0-7 but provides no context or recovery mechanism.
+
+**Evidence from spec:**
+```
+Error codes: 0-7
+0: Success
+1: Camera init failed
+2: Capture failed
+3: Memory allocation failed
+4: WiFi disconnected
+5: MQTT disconnected
+6: Storage error
+7: Unknown error
+```
+
+**Current Issues:**
+- No error message strings provided
+- No automatic retry logic
+- Device hangs after error instead of recovering
+- No diagnostic information (memory state, last successful operation, etc.)
+
+**Required Fix:**
+- Add error_message field to status publications
+- Implement retry logic with exponential backoff
+- Add diagnostic data (free_heap, uptime, last_capture_time)
+- Device should recover gracefully, not hang
+
+**Priority:** BLOCKING - Cannot troubleshoot field deployments without proper error reporting
+
+---
+
+### 3. No next_wake Command Support (SCHEDULING-002) - CRITICAL
+
+**Problem:** Device does not implement `next_wake` command handling.
+
+**Evidence:** Device appears to use internal hardcoded timer, ignoring server scheduling commands.
+
+**Impact:**
+- Cannot control device capture schedules remotely
+- Cannot implement dynamic intervals based on conditions
+- Cannot optimize battery life with adaptive scheduling
+
+**Required Fix:**
+```json
+// Device MUST handle this command:
+{
+  "device_id": "B8F862F9CFB8",
+  "next_wake": "2025-10-07T16:48:00Z"
+}
+```
+
+- Parse ISO 8601 timestamp
+- Calculate sleep duration from current time
+- Enter deep sleep for calculated duration
+- Wake at specified time (±30 second tolerance acceptable)
+- Fallback to 12-hour default if parsing fails
+
+**Priority:** BLOCKING - Core scheduling functionality required for production
+
+---
+
+### 4. Excessive Metadata Redundancy (PROTOCOL-003) - HIGH
+
+**Problem:** After initial metadata with complete sensor data, device sends 30-50 duplicate metadata messages with empty/null fields during chunk transmission.
+
+**Evidence:**
+```
+[15:34:27] METADATA: image_2.jpg, 49272 bytes, temp: 26.98°C, humidity: 56.24%
+[15:34:29] METADATA: image_2.jpg, null bytes, null temp, null humidity
+[15:34:29] METADATA: image_2.jpg, null bytes, null temp, null humidity
+[15:34:29] METADATA: image_2.jpg, null bytes, null temp, null humidity
+... (30+ more empty metadata messages)
+```
+
+**Impact:**
+- Wastes MQTT bandwidth
+- Increases processing overhead
+- Confuses debugging/monitoring
+- Increases cloud costs
+
+**Required Fix:**
+- Send complete metadata ONCE at start of transmission
+- Do NOT send metadata during chunk retransmission
+- OR rate-limit to maximum 1 metadata per second
+- Ensure all metadata includes full sensor data
+
+**Priority:** HIGH - Affects performance and costs at scale
+
+---
+
+### 5. SHA256 Hash Not Provided (INTEGRITY-001) - MEDIUM
+
+**Problem:** Device does not calculate or send SHA256 hash of captured image.
+
+**Impact:**
+- Cannot verify image integrity after transmission
+- Cannot detect corruption during chunked transfer
+- Cannot identify duplicate images
+
+**Required Fix:**
+- Calculate SHA256 hash of complete JPEG data
+- Include in initial metadata message:
+```json
+{
+  "image_name": "image_2.jpg",
+  "image_bytes": 49272,
+  "image_sha256": "a1b2c3d4e5f6...",
+  "chunk_count": 49
+}
+```
+
+**Priority:** MEDIUM - Important for production reliability
+
+---
+
+### 6. No Firmware Version Reporting (DEBUG-001) - LOW
+
+**Problem:** Device does not report firmware version in status messages.
+
+**Impact:** Cannot verify which firmware version is deployed in field. Troubleshooting and update tracking impossible.
+
+**Required Fix:**
+```json
+{
+  "device_id": "B8F862F9CFB8",
+  "status": "alive",
+  "firmware_version": "v1.2.3",
+  "uptime_seconds": 3600
+}
+```
+
+**Priority:** LOW - Helpful but not blocking
+
+---
+
+## Firmware Requirements Summary
+
+### BLOCKING (Must Fix Before Beta)
+
+1. **SOI/EOI JPEG Markers (IMAGE-001)** - Cannot validate image integrity
+2. **Error Reporting Implementation (ERROR-001)** - Cannot troubleshoot field issues
+3. **next_wake Command Support (SCHEDULING-002)** - Cannot control device schedules
+
+### HIGH PRIORITY (Should Fix Before Beta)
+
+4. **Reduce Metadata Redundancy (PROTOCOL-003)** - Performance and cost impact
+
+### MEDIUM PRIORITY (Recommended)
+
+5. **SHA256 Hash Calculation (INTEGRITY-001)** - Image verification
+6. **Firmware Version Reporting (DEBUG-001)** - Deployment tracking
+
+### OPTIONAL (Nice to Have)
 
 - Battery voltage/percentage reporting
 - WiFi RSSI reporting
-- Enhanced error messages (currently uses numeric codes 0-7)
+- Additional diagnostic metrics
 
 ---
 
@@ -220,11 +374,13 @@ None - firmware currently functional.
 - [x] Production deployment
 - [x] Live device testing
 
-**Firmware Side - FUNCTIONAL**
-- [x] Core functionality working
-- [ ] Implement next_wake command (recommended)
-- [ ] Reduce metadata redundancy (optional)
-- [ ] Add firmware version reporting (optional)
+**Firmware Side - NOT READY**
+- [ ] Fix SOI/EOI JPEG markers (BLOCKING)
+- [ ] Implement error reporting with recovery (BLOCKING)
+- [ ] Implement next_wake command support (BLOCKING)
+- [ ] Reduce metadata redundancy (HIGH)
+- [ ] Add SHA256 hash calculation (MEDIUM)
+- [ ] Add firmware version reporting (MEDIUM)
 
 **Operations - PENDING**
 - [ ] Device provisioning process
@@ -283,20 +439,24 @@ None - firmware currently functional.
 
 ## Conclusion
 
-**System Status:** Production Ready
+**System Status:** NOT READY FOR BETA
 
-**Server:** All critical issues resolved, live tested, deployed, stable.
+**Server:** 100% ready - all critical issues resolved, live tested, deployed, stable.
 
-**Firmware:** Core functionality working. Recommended updates non-blocking.
+**Firmware:** NOT READY - 3 blocking issues must be fixed:
+1. Missing JPEG SOI/EOI markers - images invalid/corrupt
+2. No error reporting or recovery - cannot troubleshoot field deployments
+3. No next_wake command support - cannot control device schedules
 
 **Next Steps:**
-1. Firmware team optionally implements next_wake command
-2. Operations sets up provisioning process
-3. Select 5-10 beta devices
-4. Monitor first 48 hours
-5. Iterate based on feedback
+1. Firmware team fixes 3 blocking issues (IMAGE-001, ERROR-001, SCHEDULING-002)
+2. Re-test with live device to validate fixes
+3. Address high-priority metadata redundancy issue
+4. Operations sets up provisioning process
+5. Select 5-10 beta devices for field testing
+6. Monitor first 48 hours closely
 
-**Beta Readiness: 95%** (server 100%, firmware functional with optional improvements)
+**Beta Readiness: 40%** (server 100%, firmware 0% - blocking issues prevent any deployment)
 
 ---
 
